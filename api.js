@@ -1,5 +1,5 @@
 // ============================================
-// COMPLETE BACKEND API - api.js
+// COMPLETE BACKEND API - api.js (FIXED)
 // ============================================
 
 const express = require('express');
@@ -308,7 +308,7 @@ function isSlotConflicting(slotStart, slotEnd, busyPeriods, existingAppointments
 }
 
 // ----------------------
-// 5. GET DOCTOR AVAILABILITY
+// 5. GET DOCTOR AVAILABILITY (FIXED)
 // ----------------------
 router.post('/doctors/:doctorId/availability', async (req, res) => {
   try {
@@ -324,7 +324,8 @@ router.post('/doctors/:doctorId/availability', async (req, res) => {
       return res.status(404).json({ error: "Doctor not found" });
     }
     
-    const dayOfWeek = new Date(date).toLocaleDateString('en-US', { weekday: 'lowercase' });
+    // FIX: Use 'long' instead of 'lowercase'
+    const dayOfWeek = new Date(date).toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
     const dayAvailability = doctor.availability[dayOfWeek];
     
     if (!dayAvailability || !dayAvailability.available) {
@@ -387,7 +388,7 @@ router.post('/doctors/:doctorId/availability', async (req, res) => {
 });
 
 // ----------------------
-// 6. BOOK APPOINTMENT (OPTIMIZED)
+// 6. BOOK APPOINTMENT (FIXED - Proper Patient ID Generation)
 // ----------------------
 router.post('/appointments/book', requireApiKey, async (req, res) => {
   try {
@@ -431,7 +432,7 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
       });
     }
     
-    // Create/update patient
+    // FIX: Proper Patient Creation/Update with patientId
     let patient = await Patient.findOne({ 
       $or: [
         ...(patientEmail ? [{ email: patientEmail }] : []),
@@ -440,16 +441,25 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
     });
     
     if (!patient) {
+      // Generate unique patient ID
+      const patientCount = await Patient.countDocuments();
+      const newPatientId = `P-${String(patientCount + 1).padStart(6, '0')}`;
+      
       patient = new Patient({
-        patientId: `P-${uuidv4().slice(0, 8)}`,
+        patientId: newPatientId,  // FIX: Explicitly set patientId
         name: patientName,
-        email: patientEmail,
-        phone: patientPhone
+        email: patientEmail || '',
+        phone: patientPhone || ''
       });
+      
+      console.log('🆕 Creating new patient with ID:', newPatientId);
     } else {
+      // Update existing patient info
       patient.name = patientName;
       if (patientEmail) patient.email = patientEmail;
       if (patientPhone) patient.phone = patientPhone;
+      
+      console.log('♻️ Updating existing patient:', patient.patientId);
     }
     
     await patient.save();
@@ -499,11 +509,15 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
       });
     }
     
+    // Generate appointment ID
+    const appointmentCount = await Appointment.countDocuments();
+    const appointmentId = `A-${String(appointmentCount + 1).padStart(6, '0')}`;
+    
     // Create appointment
     const appointment = new Appointment({
-      appointmentId: `A-${uuidv4().slice(0, 8)}`,
+      appointmentId: appointmentId,
       doctorId: doctor.doctorId,
-      patientId: patient.patientId,
+      patientId: patient.patientId,  // FIX: Use the properly generated patientId
       date: date,
       startDateTime: new Date(startDateTimeISO),
       endDateTime: new Date(endDateTimeISO),
