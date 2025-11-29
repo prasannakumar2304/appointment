@@ -1,5 +1,5 @@
 // ============================================
-// COMPLETE BACKEND API - api.js (FIXED)
+// COMPLETE BACKEND API - api.js
 // ============================================
 
 const express = require('express');
@@ -308,7 +308,7 @@ function isSlotConflicting(slotStart, slotEnd, busyPeriods, existingAppointments
 }
 
 // ----------------------
-// 5. GET DOCTOR AVAILABILITY (FIXED)
+// 5. GET DOCTOR AVAILABILITY
 // ----------------------
 router.post('/doctors/:doctorId/availability', async (req, res) => {
   try {
@@ -324,8 +324,7 @@ router.post('/doctors/:doctorId/availability', async (req, res) => {
       return res.status(404).json({ error: "Doctor not found" });
     }
     
-    // FIX: Use 'long' instead of 'lowercase'
-    const dayOfWeek = new Date(date).toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+    const dayOfWeek = new Date(date).toLocaleDateString('en-US', { weekday: 'lowercase' });
     const dayAvailability = doctor.availability[dayOfWeek];
     
     if (!dayAvailability || !dayAvailability.available) {
@@ -343,29 +342,13 @@ router.post('/doctors/:doctorId/availability', async (req, res) => {
     const timeMax = `${date}T23:59:59+05:30`;
     
     let busyPeriods = [];
-    let calendarCheckFailed = false;
-    
     try {
       if (doctor.calendarId) {
         const freeBusy = await getFreeBusy(doctor.calendarId, timeMin, timeMax);
         busyPeriods = freeBusy.busy || [];
-        console.log('✅ Calendar availability checked successfully');
-      } else {
-        console.log('ℹ️  No calendar configured for this doctor');
       }
     } catch (calErr) {
-      calendarCheckFailed = true;
-      console.warn('⚠️  Calendar check failed:', calErr.message);
-      
-      // Log specific error types
-      if (calErr.message && calErr.message.includes('deleted_client')) {
-        console.error('🔴 Google OAuth client deleted/revoked - falling back to DB-only availability');
-      } else if (calErr.message && calErr.message.includes('invalid_grant')) {
-        console.error('🔴 Google OAuth token expired - falling back to DB-only availability');
-      }
-      
-      // Continue without calendar data - will only use DB appointments
-      console.log('📊 Using database appointments only for availability');
+      console.warn('Calendar check skipped:', calErr.message);
     }
     
     const existingAppointments = await Appointment.find({
@@ -394,9 +377,7 @@ router.post('/doctors/:doctorId/availability', async (req, res) => {
         end: dayAvailability.end
       },
       availableSlots: availableSlots,
-      totalSlots: availableSlots.length,
-      calendarIntegration: calendarCheckFailed ? 'unavailable' : 'active',
-      notice: calendarCheckFailed ? 'Showing availability based on confirmed appointments only' : null
+      totalSlots: availableSlots.length
     });
     
   } catch (err) {
@@ -406,7 +387,7 @@ router.post('/doctors/:doctorId/availability', async (req, res) => {
 });
 
 // ----------------------
-// 6. BOOK APPOINTMENT (FIXED - Proper Patient ID Generation)
+// 6. BOOK APPOINTMENT (OPTIMIZED)
 // ----------------------
 router.post('/appointments/book', requireApiKey, async (req, res) => {
   try {
@@ -450,7 +431,7 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
       });
     }
     
-    // FIX: Proper Patient Creation/Update with patientId
+    // Create/update patient
     let patient = await Patient.findOne({ 
       $or: [
         ...(patientEmail ? [{ email: patientEmail }] : []),
@@ -459,29 +440,35 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
     });
     
     if (!patient) {
-      // Generate unique patient ID
-      const patientCount = await Patient.countDocuments();
-      const newPatientId = `P-${String(patientCount + 1).padStart(6, '0')}`;
-      
-      patient = new Patient({
-        patientId: newPatientId,  // FIX: Explicitly set patientId
-        name: patientName,
-        email: patientEmail || '',
-        phone: patientPhone || ''
-      });
-      
+      const newPatientId = `P-${uuidv4().slice(0, 8)}`;
       console.log('🆕 Creating new patient with ID:', newPatientId);
+      patient = new Patient({
+        patientId: newPatientId,
+        name: patientName,
+        email: patientEmail,
+        phone: patientPhone
+      });
     } else {
-      // Update existing patient info
+      console.log('📝 Updating existing patient:', patient.patientId);
       patient.name = patientName;
       if (patientEmail) patient.email = patientEmail;
       if (patientPhone) patient.phone = patientPhone;
-      
-      console.log('♻️ Updating existing patient:', patient.patientId);
     }
     
-    await patient.save();
-    console.log('✅ Patient saved:', patient.patientId);
+    try {
+      await patient.save();
+      console.log('✅ Patient saved:', patient.patientId);
+    } catch (saveErr) {
+      console.error('❌ Patient save error:', saveErr.message);
+      if (saveErr.code === 11000) {
+        return res.status(409).json({
+          success: false,
+          error: 'Patient already exists',
+          details: saveErr.message
+        });
+      }
+      throw saveErr;
+    }
     
     // Parse time slot
     const timeMatch = timeSlot.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
@@ -527,15 +514,11 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
       });
     }
     
-    // Generate appointment ID
-    const appointmentCount = await Appointment.countDocuments();
-    const appointmentId = `A-${String(appointmentCount + 1).padStart(6, '0')}`;
-    
     // Create appointment
     const appointment = new Appointment({
-      appointmentId: appointmentId,
+      appointmentId: `A-${uuidv4().slice(0, 8)}`,
       doctorId: doctor.doctorId,
-      patientId: patient.patientId,  // FIX: Use the properly generated patientId
+      patientId: patient.patientId,
       date: date,
       startDateTime: new Date(startDateTimeISO),
       endDateTime: new Date(endDateTimeISO),
@@ -592,7 +575,7 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
           attachmentUrl: null
         });
         
-        // Google Calendar (with robust error handling)
+        // Google Calendar
         let googleEvent = null;
         if (doctor.calendarId) {
           try {
@@ -615,51 +598,15 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
             
             googleEvent = await createEvent(doctor.calendarId, eventObj);
             
-            if (googleEvent && googleEvent.id) {
-              await Appointment.updateOne(
-                { appointmentId: appointment.appointmentId },
-                { googleEventId: googleEvent.id }
-              );
-              console.log('✅ Calendar event created:', googleEvent.id);
-            } else {
-              console.warn('⚠️  Calendar event created but no ID returned');
-              await Appointment.updateOne(
-                { appointmentId: appointment.appointmentId },
-                { googleEventId: 'calendar-unavailable' }
-              );
-            }
-          } catch (calErr) {
-            console.error('❌ Calendar error:', calErr.message);
-            
-            // Handle specific Google Calendar errors
-            if (calErr.message && calErr.message.includes('deleted_client')) {
-              console.error('🔴 Google OAuth client has been deleted or revoked');
-              console.error('📝 Action needed: Reconfigure Google Calendar integration in admin panel');
-            } else if (calErr.message && calErr.message.includes('invalid_grant')) {
-              console.error('🔴 Google OAuth token expired or invalid');
-              console.error('📝 Action needed: Re-authenticate Google Calendar in admin panel');
-            } else if (calErr.message && calErr.message.includes('insufficient permissions')) {
-              console.error('🔴 Insufficient permissions for Google Calendar');
-              console.error('📝 Action needed: Grant calendar access in Google Cloud Console');
-            }
-            
-            // Mark appointment with calendar error status
             await Appointment.updateOne(
               { appointmentId: appointment.appointmentId },
-              { 
-                googleEventId: 'calendar-error',
-                calendarError: calErr.message || 'Unknown calendar error'
-              }
+              { googleEventId: googleEvent.id }
             );
             
-            console.log('⚠️  Appointment saved without calendar integration');
+            console.log('✅ Calendar event created:', googleEvent.id);
+          } catch (calErr) {
+            console.error('❌ Calendar error:', calErr.message);
           }
-        } else {
-          console.log('ℹ️  No calendar configured for this doctor - skipping calendar event');
-          await Appointment.updateOne(
-            { appointmentId: appointment.appointmentId },
-            { googleEventId: 'no-calendar' }
-          );
         }
         
         // Send email
