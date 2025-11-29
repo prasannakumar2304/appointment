@@ -1,166 +1,188 @@
 // ============================================
-// GOOGLE CALENDAR API INTEGRATION
+// GOOGLE CALENDAR INTEGRATION - google.js (IMPROVED)
 // ============================================
 
 const { google } = require('googleapis');
 
+// ----------------------
 // OAuth2 Client Setup
+// ----------------------
 function getOAuth2Client() {
-  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
-    throw new Error('Google OAuth credentials not configured');
+  // Check if credentials are configured
+  if (!process.env.GOOGLE_CLIENT_ID || 
+      !process.env.GOOGLE_CLIENT_SECRET || 
+      !process.env.GOOGLE_REFRESH_TOKEN) {
+    throw new Error('Google Calendar not configured - missing environment variables');
   }
 
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/oauth2callback'
+    process.env.GOOGLE_REDIRECT_URI || 'http://localhost:4000/oauth/callback'
   );
 
-  if (process.env.GOOGLE_REFRESH_TOKEN) {
-    oauth2Client.setCredentials({
-      refresh_token: process.env.GOOGLE_REFRESH_TOKEN
-    });
-  }
+  oauth2Client.setCredentials({
+    refresh_token: process.env.GOOGLE_REFRESH_TOKEN
+  });
 
   return oauth2Client;
 }
 
+// ----------------------
 // Get Calendar Instance
+// ----------------------
 function getCalendar() {
   try {
     const auth = getOAuth2Client();
     return google.calendar({ version: 'v3', auth });
-  } catch (error) {
-    console.warn('⚠️  Google Calendar not configured:', error.message);
+  } catch (err) {
+    console.error('❌ Failed to initialize Google Calendar:', err.message);
+    throw err;
+  }
+}
+
+// ----------------------
+// Check if Calendar Integration is Available
+// ----------------------
+function isCalendarAvailable() {
+  try {
+    getOAuth2Client();
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+// ----------------------
+// Create Calendar Event
+// ----------------------
+async function createEvent(calendarId, eventDetails) {
+  if (!isCalendarAvailable()) {
+    console.warn('⚠️  Google Calendar not configured - skipping event creation');
     return null;
   }
-}
-
-// ----------------------
-// LIST CALENDARS
-// ----------------------
-async function listCalendars() {
-  const calendar = getCalendar();
-  if (!calendar) {
-    throw new Error('Google Calendar not configured');
-  }
 
   try {
-    const response = await calendar.calendarList.list();
-    return response.data.items;
-  } catch (error) {
-    console.error('Error listing calendars:', error.message);
-    throw error;
-  }
-}
-
-// ----------------------
-// GET FREE/BUSY INFO
-// ----------------------
-async function getFreeBusy(calendarId, timeMin, timeMax) {
-  const calendar = getCalendar();
-  if (!calendar) {
-    console.warn('Calendar not configured, returning empty busy periods');
-    return { busy: [] };
-  }
-
-  try {
-    const response = await calendar.freebusy.query({
-      requestBody: {
-        timeMin,
-        timeMax,
-        timeZone: 'Asia/Kolkata',
-        items: [{ id: calendarId }]
-      }
-    });
-
-    const busyPeriods = response.data.calendars[calendarId]?.busy || [];
-    return { busy: busyPeriods };
+    const calendar = getCalendar();
     
-  } catch (error) {
-    console.error('Error checking free/busy:', error.message);
-    return { busy: [] };
-  }
-}
-
-// ----------------------
-// CREATE CALENDAR EVENT
-// ----------------------
-async function createEvent(calendarId, eventData) {
-  const calendar = getCalendar();
-  if (!calendar) {
-    console.warn('Calendar not configured, skipping event creation');
-    return { id: 'manual-' + Date.now(), htmlLink: null };
-  }
-
-  try {
     const response = await calendar.events.insert({
       calendarId: calendarId,
-      requestBody: {
-        summary: eventData.summary,
-        description: eventData.description,
-        start: eventData.start,
-        end: eventData.end,
-        attendees: eventData.attendees || [],
-        reminders: {
-          useDefault: false,
-          overrides: [
-            { method: 'email', minutes: 24 * 60 },
-            { method: 'popup', minutes: 30 }
-          ]
-        },
-        conferenceData: eventData.conferenceData || null
-      },
-      conferenceDataVersion: eventData.conferenceData ? 1 : 0,
-      sendUpdates: 'all'
+      requestBody: eventDetails,
+      sendUpdates: 'all' // Send email invites to attendees
     });
 
     console.log('✅ Calendar event created:', response.data.id);
     return response.data;
+
+  } catch (err) {
+    console.error('❌ Error creating calendar event:', err.message);
     
-  } catch (error) {
-    console.error('Error creating event:', error.message);
-    throw error;
+    // Handle specific error types
+    if (err.message.includes('deleted_client')) {
+      throw new Error('Google OAuth client has been deleted or revoked. Please reconfigure Google Calendar integration.');
+    } else if (err.message.includes('invalid_grant')) {
+      throw new Error('Google OAuth token expired or invalid. Please re-authenticate Google Calendar.');
+    } else if (err.message.includes('insufficient permissions')) {
+      throw new Error('Insufficient permissions for Google Calendar. Please grant calendar access.');
+    } else if (err.message.includes('Calendar not found')) {
+      throw new Error(`Calendar "${calendarId}" not found. Please check the calendar ID.`);
+    } else if (err.code === 403) {
+      throw new Error('Access forbidden. Check Google Calendar API quotas and permissions.');
+    } else if (err.code === 401) {
+      throw new Error('Authentication failed. Google OAuth credentials may be invalid.');
+    }
+    
+    throw err;
   }
 }
 
 // ----------------------
-// UPDATE CALENDAR EVENT
+// Get Free/Busy Information
 // ----------------------
-async function updateEvent(calendarId, eventId, eventData) {
-  const calendar = getCalendar();
-  if (!calendar) {
-    throw new Error('Google Calendar not configured');
+async function getFreeBusy(calendarId, timeMin, timeMax) {
+  if (!isCalendarAvailable()) {
+    console.warn('⚠️  Google Calendar not configured - returning empty busy periods');
+    return { busy: [] };
   }
 
   try {
+    const calendar = getCalendar();
+    
+    const response = await calendar.freebusy.query({
+      requestBody: {
+        timeMin: timeMin,
+        timeMax: timeMax,
+        items: [{ id: calendarId }]
+      }
+    });
+
+    const calendarData = response.data.calendars[calendarId];
+    
+    if (!calendarData) {
+      console.warn(`⚠️  No data found for calendar: ${calendarId}`);
+      return { busy: [] };
+    }
+
+    console.log(`✅ Free/busy fetched for ${calendarId}: ${calendarData.busy.length} busy periods`);
+    return calendarData;
+
+  } catch (err) {
+    console.error('❌ Error fetching free/busy:', err.message);
+    
+    // Handle specific errors
+    if (err.message.includes('deleted_client')) {
+      console.error('🔴 OAuth client deleted - falling back to database-only availability');
+    } else if (err.message.includes('invalid_grant')) {
+      console.error('🔴 OAuth token expired - falling back to database-only availability');
+    } else if (err.message.includes('Calendar not found')) {
+      console.error(`🔴 Calendar "${calendarId}" not found - falling back to database-only availability`);
+    }
+    
+    // Return empty busy periods as fallback
+    return { busy: [] };
+  }
+}
+
+// ----------------------
+// Update Calendar Event
+// ----------------------
+async function updateEvent(calendarId, eventId, updates) {
+  if (!isCalendarAvailable()) {
+    console.warn('⚠️  Google Calendar not configured - skipping event update');
+    return null;
+  }
+
+  try {
+    const calendar = getCalendar();
+    
     const response = await calendar.events.patch({
       calendarId: calendarId,
       eventId: eventId,
-      requestBody: eventData,
+      requestBody: updates,
       sendUpdates: 'all'
     });
 
-    console.log('✅ Calendar event updated:', response.data.id);
+    console.log('✅ Calendar event updated:', eventId);
     return response.data;
-    
-  } catch (error) {
-    console.error('Error updating event:', error.message);
-    throw error;
+
+  } catch (err) {
+    console.error('❌ Error updating calendar event:', err.message);
+    throw err;
   }
 }
 
 // ----------------------
-// DELETE CALENDAR EVENT
+// Delete Calendar Event
 // ----------------------
 async function deleteEvent(calendarId, eventId) {
-  const calendar = getCalendar();
-  if (!calendar) {
-    console.warn('Calendar not configured, skipping event deletion');
-    return { deleted: true };
+  if (!isCalendarAvailable()) {
+    console.warn('⚠️  Google Calendar not configured - skipping event deletion');
+    return null;
   }
 
   try {
+    const calendar = getCalendar();
+    
     await calendar.events.delete({
       calendarId: calendarId,
       eventId: eventId,
@@ -168,113 +190,103 @@ async function deleteEvent(calendarId, eventId) {
     });
 
     console.log('✅ Calendar event deleted:', eventId);
-    return { deleted: true };
-    
-  } catch (error) {
-    console.error('Error deleting event:', error.message);
-    throw error;
+    return true;
+
+  } catch (err) {
+    console.error('❌ Error deleting calendar event:', err.message);
+    throw err;
   }
 }
 
 // ----------------------
-// GET EVENT BY ID
+// List Available Calendars
 // ----------------------
-async function getEvent(calendarId, eventId) {
-  const calendar = getCalendar();
-  if (!calendar) {
-    throw new Error('Google Calendar not configured');
+async function listCalendars() {
+  if (!isCalendarAvailable()) {
+    console.warn('⚠️  Google Calendar not configured');
+    return [];
   }
 
   try {
-    const response = await calendar.events.get({
-      calendarId: calendarId,
-      eventId: eventId
-    });
-
-    return response.data;
+    const calendar = getCalendar();
     
-  } catch (error) {
-    console.error('Error getting event:', error.message);
-    throw error;
+    const response = await calendar.calendarList.list();
+    
+    const calendars = response.data.items.map(cal => ({
+      id: cal.id,
+      summary: cal.summary,
+      primary: cal.primary || false,
+      accessRole: cal.accessRole
+    }));
+
+    console.log(`✅ Found ${calendars.length} calendars`);
+    return calendars;
+
+  } catch (err) {
+    console.error('❌ Error listing calendars:', err.message);
+    throw err;
   }
 }
 
 // ----------------------
-// LIST EVENTS
+// Test Calendar Connection
 // ----------------------
-async function listEvents(calendarId, timeMin, timeMax) {
-  const calendar = getCalendar();
-  if (!calendar) {
-    throw new Error('Google Calendar not configured');
-  }
-
+async function testConnection() {
+  console.log('🧪 Testing Google Calendar connection...');
+  
   try {
-    const response = await calendar.events.list({
-      calendarId: calendarId,
-      timeMin: timeMin,
-      timeMax: timeMax,
-      singleEvents: true,
-      orderBy: 'startTime'
-    });
+    if (!isCalendarAvailable()) {
+      console.log('❌ Google Calendar not configured');
+      return {
+        success: false,
+        error: 'Missing environment variables',
+        configured: false
+      };
+    }
 
-    return response.data.items || [];
+    const calendars = await listCalendars();
     
-  } catch (error) {
-    console.error('Error listing events:', error.message);
-    throw error;
-  }
-}
-
-// ----------------------
-// CREATE VIDEO CONFERENCE
-// ----------------------
-async function createVideoConference(calendarId, eventData) {
-  const calendar = getCalendar();
-  if (!calendar) {
-    throw new Error('Google Calendar not configured');
-  }
-
-  try {
-    const conferenceData = {
-      createRequest: {
-        requestId: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        conferenceSolutionKey: {
-          type: 'hangoutsMeet'
-        }
-      }
+    console.log('✅ Google Calendar connection successful');
+    console.log(`📅 Available calendars: ${calendars.length}`);
+    
+    return {
+      success: true,
+      configured: true,
+      calendarsCount: calendars.length,
+      calendars: calendars
     };
 
-    const response = await calendar.events.insert({
-      calendarId: calendarId,
-      conferenceDataVersion: 1,
-      requestBody: {
-        ...eventData,
-        conferenceData: conferenceData
-      },
-      sendUpdates: 'all'
-    });
-
-    console.log('✅ Video conference created:', response.data.hangoutLink);
-    return response.data;
+  } catch (err) {
+    console.error('❌ Calendar connection test failed:', err.message);
     
-  } catch (error) {
-    console.error('Error creating video conference:', error.message);
-    throw error;
+    return {
+      success: false,
+      error: err.message,
+      configured: true
+    };
   }
 }
 
 // ----------------------
-// EXPORT FUNCTIONS
+// Exports
 // ----------------------
 module.exports = {
-  getOAuth2Client,
-  getCalendar,
-  listCalendars,
-  getFreeBusy,
   createEvent,
+  getFreeBusy,
   updateEvent,
   deleteEvent,
-  getEvent,
-  listEvents,
-  createVideoConference
+  listCalendars,
+  testConnection,
+  isCalendarAvailable
 };
+
+// ----------------------
+// Self-Test on Module Load (Optional)
+// ----------------------
+if (require.main === module) {
+  // Run test if executed directly
+  testConnection().then(result => {
+    console.log('\n📊 Test Result:', JSON.stringify(result, null, 2));
+    process.exit(result.success ? 0 : 1);
+  });
+}
