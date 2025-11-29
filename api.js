@@ -9,7 +9,7 @@ const nodemailer = require('nodemailer');
 
 const Doctor = require('./Doctor');
 const Patient = require('./Patient');
-const Appointment = require('./Appointment');
+const Appointment = require('./appointment');
 
 const { getFreeBusy, createEvent, listCalendars } = require('./google');
 
@@ -845,4 +845,5 @@ router.get('/health', (req, res) => {
 // ----------------------
 // Export Router
 // ----------------------
+
 module.exports = router;
