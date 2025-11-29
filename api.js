@@ -343,13 +343,29 @@ router.post('/doctors/:doctorId/availability', async (req, res) => {
     const timeMax = `${date}T23:59:59+05:30`;
     
     let busyPeriods = [];
+    let calendarCheckFailed = false;
+    
     try {
       if (doctor.calendarId) {
         const freeBusy = await getFreeBusy(doctor.calendarId, timeMin, timeMax);
         busyPeriods = freeBusy.busy || [];
+        console.log('✅ Calendar availability checked successfully');
+      } else {
+        console.log('ℹ️  No calendar configured for this doctor');
       }
     } catch (calErr) {
-      console.warn('Calendar check skipped:', calErr.message);
+      calendarCheckFailed = true;
+      console.warn('⚠️  Calendar check failed:', calErr.message);
+      
+      // Log specific error types
+      if (calErr.message && calErr.message.includes('deleted_client')) {
+        console.error('🔴 Google OAuth client deleted/revoked - falling back to DB-only availability');
+      } else if (calErr.message && calErr.message.includes('invalid_grant')) {
+        console.error('🔴 Google OAuth token expired - falling back to DB-only availability');
+      }
+      
+      // Continue without calendar data - will only use DB appointments
+      console.log('📊 Using database appointments only for availability');
     }
     
     const existingAppointments = await Appointment.find({
@@ -378,7 +394,9 @@ router.post('/doctors/:doctorId/availability', async (req, res) => {
         end: dayAvailability.end
       },
       availableSlots: availableSlots,
-      totalSlots: availableSlots.length
+      totalSlots: availableSlots.length,
+      calendarIntegration: calendarCheckFailed ? 'unavailable' : 'active',
+      notice: calendarCheckFailed ? 'Showing availability based on confirmed appointments only' : null
     });
     
   } catch (err) {
@@ -574,7 +592,7 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
           attachmentUrl: null
         });
         
-        // Google Calendar
+        // Google Calendar (with robust error handling)
         let googleEvent = null;
         if (doctor.calendarId) {
           try {
@@ -597,15 +615,51 @@ router.post('/appointments/book', requireApiKey, async (req, res) => {
             
             googleEvent = await createEvent(doctor.calendarId, eventObj);
             
-            await Appointment.updateOne(
-              { appointmentId: appointment.appointmentId },
-              { googleEventId: googleEvent.id }
-            );
-            
-            console.log('✅ Calendar event created:', googleEvent.id);
+            if (googleEvent && googleEvent.id) {
+              await Appointment.updateOne(
+                { appointmentId: appointment.appointmentId },
+                { googleEventId: googleEvent.id }
+              );
+              console.log('✅ Calendar event created:', googleEvent.id);
+            } else {
+              console.warn('⚠️  Calendar event created but no ID returned');
+              await Appointment.updateOne(
+                { appointmentId: appointment.appointmentId },
+                { googleEventId: 'calendar-unavailable' }
+              );
+            }
           } catch (calErr) {
             console.error('❌ Calendar error:', calErr.message);
+            
+            // Handle specific Google Calendar errors
+            if (calErr.message && calErr.message.includes('deleted_client')) {
+              console.error('🔴 Google OAuth client has been deleted or revoked');
+              console.error('📝 Action needed: Reconfigure Google Calendar integration in admin panel');
+            } else if (calErr.message && calErr.message.includes('invalid_grant')) {
+              console.error('🔴 Google OAuth token expired or invalid');
+              console.error('📝 Action needed: Re-authenticate Google Calendar in admin panel');
+            } else if (calErr.message && calErr.message.includes('insufficient permissions')) {
+              console.error('🔴 Insufficient permissions for Google Calendar');
+              console.error('📝 Action needed: Grant calendar access in Google Cloud Console');
+            }
+            
+            // Mark appointment with calendar error status
+            await Appointment.updateOne(
+              { appointmentId: appointment.appointmentId },
+              { 
+                googleEventId: 'calendar-error',
+                calendarError: calErr.message || 'Unknown calendar error'
+              }
+            );
+            
+            console.log('⚠️  Appointment saved without calendar integration');
           }
+        } else {
+          console.log('ℹ️  No calendar configured for this doctor - skipping calendar event');
+          await Appointment.updateOne(
+            { appointmentId: appointment.appointmentId },
+            { googleEventId: 'no-calendar' }
+          );
         }
         
         // Send email
